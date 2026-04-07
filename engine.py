@@ -2,24 +2,20 @@ from collections import deque
 from typing import List, Dict, Set, Any
 
 class PropagationEngine:
-    def __init__(self, tasks_data: List[Dict[str, Any]], constraints: Dict[str, Any] = None):
+    def __init__(self, payload: Dict[str, Any]):
         """
-        Initializes the PropagationEngine.
-        restrictions:
-        - No modification of input
-        - No introduction of new rules
-        - No randomness
-        - No business logic assumptions
+        Initializes the PropagationEngine matching the exact input contract.
         """
-        # Store input as immutable reference source. We do not modify these dictionaries.
-        self.tasks_data = tasks_data
-        self.constraints = constraints if constraints is not None else {}
+        self.execution_id = payload.get("execution_id", "default_run")
+        self.tasks_data = payload.get("tasks", [])
+        constraints_list = payload.get("constraint_results", [])
+        
+        # O(1) map for constraints
+        self.constraints = {c["task_id"]: c for c in constraints_list if "task_id" in c}
         
         # Mappings
-        # Reverse adjacency: task -> its dependencies
-        self.reverse_adjacency: Dict[str, Set[str]] = {}
-        # Adjacency list: dependency -> dependent
-        self.adjacency: Dict[str, Set[str]] = {}
+        self.reverse_adjacency: Dict[str, Set[str]] = {} # dependent -> dependencies
+        self.adjacency: Dict[str, Set[str]] = {} # dependency -> dependent
         
         self.valid_task_ids = set()
         
@@ -29,96 +25,96 @@ class PropagationEngine:
         """
         Phase 1 - Graph Construction
         """
-        # Step 1: Collect all valid task IDs
+        # Collect valid IDs first
         for task in self.tasks_data:
-            task_id = task.get("id")
+            task_id = task.get("task_id")
             if task_id is not None:
                 self.valid_task_ids.add(task_id)
                 self.reverse_adjacency[task_id] = set()
                 if task_id not in self.adjacency:
                     self.adjacency[task_id] = set()
 
-        # Step 2: Build adjacency mappings
+        # Build mappings
         for task in self.tasks_data:
-            task_id = task.get("id")
+            task_id = task.get("task_id")
             if task_id is None:
                 continue
 
-            deps = task.get("dependencies", [])
+            deps = task.get("depends_on", [])
             for dep in deps:
-                # ignore invalid references without fixing or erroring out
+                # ignore invalid references
                 if dep not in self.valid_task_ids:
                     continue
                 
-                # Sets handle duplicate edges naturally
                 self.reverse_adjacency[task_id].add(dep)
                 
                 if dep not in self.adjacency:
                     self.adjacency[dep] = set()
                 self.adjacency[dep].add(task_id)
 
-    def get_downstream_tasks(self, task_id: str) -> List[str]:
+    def get_downstream_tasks(self, task_id: str) -> Dict[str, Any]:
         """
-        Phase 2 - Deterministic Traversal Engine (Iterative BFS)
-        Computes all downstream affected tasks deterministically without recursion.
+        Phase 2 & 3 - Deterministic Traversal Engine (Iterative BFS)
+        Computes downstream tasks and max propagation_depth.
         """
         if task_id not in self.valid_task_ids:
-            return []
+            return {"affected_tasks": [], "propagation_depth": 0}
 
         downstream = set()
-        queue = deque([task_id])
+        queue = deque([(task_id, 0)])
+        max_depth = 0
         
         while queue:
-            current = queue.popleft()
+            current, depth = queue.popleft()
+            max_depth = max(max_depth, depth)
             
-            # Sort dependents to ensure strictly deterministic traversal order
+            # Deterministic sorting of dependents list
             dependents = sorted(list(self.adjacency.get(current, set())))
             
             for dependent in dependents:
                 if dependent not in downstream:
                     downstream.add(dependent)
-                    queue.append(dependent)
+                    queue.append((dependent, depth + 1))
                     
-        # Return sorted list for consistent deterministic output structure
-        return sorted(list(downstream))
+        return {
+            "affected_tasks": sorted(list(downstream)),
+            "propagation_depth": max_depth
+        }
 
-    def compute_all_propagations(self) -> Dict[str, Dict[str, Any]]:
+    def compute_all_propagations(self) -> Dict[str, Any]:
         """
-        Computes downstream propagation and structure scoring outputs for all tasks.
-        Uses graph topology and provided constraint properties.
+        Phase 3, 4, 5, 6 - Complies to STRICT OUTPUT CONTRACT.
         """
-        results = {}
+        results_list = []
+        max_impact = 0
+        max_global_depth = 0
         
+        # Phase 5 - Output sorted by task_id
         for task_id in sorted(list(self.valid_task_ids)):
-            affected_downstream = self.get_downstream_tasks(task_id)
+            traversal_result = self.get_downstream_tasks(task_id)
+            affected = traversal_result["affected_tasks"]
+            depth = traversal_result["propagation_depth"]
             
-            # Create a task mapping to extract properties cleanly without mutation
-            task_node = next((t for t in self.tasks_data if t.get("id") == task_id), {})
-            base_score = task_node.get("score", 0)
+            impact_score = len(affected)
+            max_impact = max(max_impact, impact_score)
+            max_global_depth = max(max_global_depth, depth)
             
-            # Extract basic topological scoring outputs
-            results[task_id] = {
-                "downstream_tasks": affected_downstream,
-                "topological_impact_size": len(affected_downstream),
-                "propagation_score": self._aggregate_score(task_id, affected_downstream, base_score)
-            }
+            results_list.append({
+                "task_id": task_id,
+                "affected_tasks": affected,
+                "impact_score": impact_score,
+                "propagation_depth": depth
+            })
             
-        return results
-
-    def _aggregate_score(self, source_task_id: str, downstream: List[str], base_score: float) -> float:
-        """
-        Deterministically aggregates structural scores with structural predictability.
-        Incorporates pre-evaluated constraints purely as input constants if present.
-        """
-        total = float(base_score)
+        total_edges = sum(len(deps) for deps in self.adjacency.values())
         
-        source_constraint = self.constraints.get(source_task_id, {})
-        # If there are constraint scores, use them
-        if "impact_multiplier" in source_constraint:
-            total *= source_constraint["impact_multiplier"]
-            
-        for ds in downstream:
-            ds_node = next((t for t in self.tasks_data if t.get("id") == ds), {})
-            total += float(ds_node.get("score", 1.0)) # assume a baseline unit weight if no score is specified
-            
-        return float(round(total, 4))
+        return {
+            "execution_id": self.execution_id,
+            "results": results_list,
+            "summary": {
+                "total_tasks": len(self.valid_task_ids),
+                "total_edges": total_edges,
+                "max_impact_score": max_impact,
+                "max_depth": max_global_depth
+            }
+        }
