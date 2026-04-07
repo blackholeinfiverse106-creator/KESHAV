@@ -91,20 +91,29 @@ class PropagationEngine:
         
         # Phase 5 - Output sorted by task_id
         for task_id in sorted(list(self.valid_task_ids)):
-            traversal_result = self.get_downstream_tasks(task_id)
-            affected = traversal_result["affected_tasks"]
-            depth = traversal_result["propagation_depth"]
-            
-            impact_score = len(affected)
-            max_impact = max(max_impact, impact_score)
-            max_global_depth = max(max_global_depth, depth)
-            
-            results_list.append({
-                "task_id": task_id,
-                "affected_tasks": affected,
-                "impact_score": impact_score,
-                "propagation_depth": depth
-            })
+            # Phase 4 - Blockage-Aware Propagation
+            # Explicitly check if task is invalid
+            constraint = self.constraints.get(task_id)
+            is_valid = True
+            if constraint is not None:
+                is_valid = constraint.get("is_valid", True)
+                
+            # If a task is invalid -> treat it as a propagation source specially
+            if is_valid is False:
+                traversal_result = self.get_downstream_tasks(task_id)
+                affected = traversal_result["affected_tasks"]
+                depth = traversal_result["propagation_depth"]
+                
+                impact_score = len(affected)
+                max_impact = max(max_impact, impact_score)
+                max_global_depth = max(max_global_depth, depth)
+                
+                results_list.append({
+                    "task_id": task_id,
+                    "affected_tasks": affected,
+                    "impact_score": impact_score,
+                    "propagation_depth": depth
+                })
             
         total_edges = sum(len(deps) for deps in self.adjacency.values())
         
@@ -118,3 +127,10 @@ class PropagationEngine:
                 "max_depth": max_global_depth
             }
         }
+
+def compute_propagation(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deliverable 1: Core entry function
+    """
+    engine = PropagationEngine(payload)
+    return engine.compute_all_propagations()
